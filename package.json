@@ -1,0 +1,10 @@
+{
+  "name": "opencode-gatekeeper",
+  "version": "0.1.0",
+  "description": "Deterministic gates for AI agent dispatches — an OpenCode plugin for Orca worktrees. The worker's own report is never the verification.",
+  "type": "module",
+  "main": "plugin/gatekeeper.js",
+  "keywords": ["opencode", "opencode-plugin", "orca", "agents", "verification", "dispatch", "worktree"],
+  "author": "Daniel Murcia",
+  "license": "MIT"
+}
