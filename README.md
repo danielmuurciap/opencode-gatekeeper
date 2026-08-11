@@ -115,11 +115,35 @@ Environment variables (set them where OpenCode runs):
 | `GATEKEEPER_VERIFY_TIMEOUT` | `300` | seconds for the acceptance command |
 | `GATEKEEPER_DB` | `~/.local/share/opencode/opencode.db` | OpenCode's DB |
 
+## Agents
+
+Four ready-to-use OpenCode agent definitions in [`agents/`](agents/) — the
+roles of the review loop ("gauntlet") documented in
+[`docs/ORCHESTRATION.md §7`](docs/ORCHESTRATION.md):
+
+| Agent | Writes | For |
+|---|---|---|
+| `scout` | no | "where does X live / what breaks" — so briefs carry exact paths |
+| `implementer` | yes | fully-specified changes; **refuses** briefs missing the four parts |
+| `reviewer` | no | diff review with fresh eyes — the implementer never audits itself |
+| `test-runner` | no | runs suites, returns only failures — output stays out of your context |
+
+```
+# per project                              # per machine
+cp agents/*.md .opencode/agent/            cp agents/*.md ~/.config/opencode/agent/
+```
+
+All four are deny-by-default (no web, no delegation — `task: deny`; agents
+that open agents open trees nobody controls). Writers dispatch through the
+gated TUI path; read-only roles can use one-shot `opencode run --agent <x>`,
+which is fine precisely because they write nothing.
+
 ## Docs
 
 - [`docs/ORCHESTRATION.md`](docs/ORCHESTRATION.md) — the full flow: spec-driven
-  changes (OpenSpec), briefs, dispatch, gates, review, merge. How to run it
-  with an orchestrating agent (Claude Code or any other) on top.
+  changes (OpenSpec), briefs, dispatch, gates, the gauntlet review loop,
+  racing, merge. How to run it with an orchestrating agent (Claude Code or
+  any other) on top.
 - [`skills/craft-brief/`](skills/craft-brief/SKILL.md) — how to write a brief
   a cheap worker can execute and you can verify without reading its code.
 - [`examples/verify/`](examples/verify/) — acceptance commands per work type

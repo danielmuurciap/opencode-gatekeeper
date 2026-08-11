@@ -209,7 +209,76 @@ A failed gate means **fix the brief and re-dispatch** — never patch the
 worker's output by hand. Hand-patching hides the brief's defect and the next
 dispatch repeats it.
 
-## 7. Racing (optional, for the hard or ambiguous)
+## 7. The gauntlet: roles, and who delegates to whom
+
+The repo ships four agent definitions (`agents/`, install: copy into
+`.opencode/agent/` of the project or `~/.config/opencode/agent/`). Each is
+deny-by-default and **none can delegate** (`task: deny`) — an agent that
+opens agents opens a tree nobody controls; we measured 2 research agents
+turning into 9 across three levels before capping it.
+
+| Role | Writes | Launched how | Why it exists |
+|---|---|---|---|
+| `scout` | no | `opencode run --agent scout "where does X live?"` | briefs need exact paths, not guesses |
+| `implementer` | **yes** | TUI dispatch (worktree + gates) | refuses briefs missing the four parts |
+| `reviewer` | no | `opencode run --agent reviewer` on the diff | the implementer can't find its own bugs |
+| `test-runner` | no | `opencode run --agent test-runner` | suite output stays out of your context |
+
+The launch asymmetry is deliberate: **writers go through the TUI dispatch so
+gates fire; read-only roles can use one-shot `opencode run`** — nothing to
+gate when nothing is written, and one-shot is cheaper and simpler.
+
+The loop, end to end (the orchestrator drives it; nothing here is a
+fire-and-forget daemon):
+
+```bash
+# 1. scout → brief   (orchestrator writes the brief + exam from scout's map)
+opencode run --agent scout "Where is quota computed? What imports it?"
+
+# 2. implementer in a gated worktree            (§3–4: seed exam, red-first)
+orca worktree create --name task --repo path:$REPO --agent opencode --json
+orca terminal send --terminal $HANDLE --text "$BRIEF" --enter
+#    … gatekeeper runs gates on idle → board: in-review or in-progress+reason
+
+# 3. gates passed → reviewer, FRESH context, in the worktree
+cd $WT && git diff | opencode run --agent reviewer \
+  "Review this diff against the brief below. Brief: $BRIEF"
+
+# 4. REVISE? → findings go back to the SAME implementer session
+orca terminal send --terminal $HANDLE --enter --text \
+  "Reviewer findings, fix exactly these and nothing else: …"
+#    … gates re-fire on the next idle (per-turn re-arm is built in)
+
+# 5. repeat 3–4 until APPROVE — with a hard cap
+```
+
+Rules that keep the loop honest:
+
+- **Three strikes.** If the same task fails gates or review three times,
+  stop dispatching: the defect is in the brief or the spec. Fix it there.
+  (Escalating the model instead of the brief pays premium for the same
+  failure — measured.)
+- **The reviewer reviews the diff, not the worker's report.** Feed it
+  `git diff` output; never ask "did it go well?".
+- **Fresh context per review round** — a reviewer that watched the
+  implementation inherits its blind spots.
+- **QA is the exam, not an agent.** The flow-level acceptance test (§3) is
+  the QA of this loop, and the dispatcher owns it. An agent drafting exams
+  for itself is self-grading with extra steps; if you want help writing the
+  exam, have an agent draft it, then YOU validate it red-first and
+  break-test it before seeding.
+- The human stays at the end: gates + reviewer shrink what reaches your
+  eyes, they don't replace them. Orca's diff annotation (hover → `+`,
+  Send to agent) is the last mile.
+
+What this loop deliberately does NOT include: an aesthetic/visual judge.
+Deterministic gates verify function; visual quality judged by a zero-shot
+model barely beats a coin flip (57.7% vs 50% in DesignPref's measurements
+against professional designers' preferences). That layer needs a corpus of
+your own accept/reject decisions first — build it as a separate stage, not
+as a default gate that ships noise with a verdict attached.
+
+## 8. Racing (optional, for the hard or ambiguous)
 
 For tasks where iteration count hurts (UI polish, ambiguous specs), race
 N cheap workers on the same brief in N worktrees. Orca's recipe: same prompt,
@@ -219,7 +288,7 @@ Gatekeeper improves the economics: workers that fail gates are discarded
 unseen — you only compare survivors. Where the survivors agree, it's probably
 right; where they split, you've found the actual hard part.
 
-## 8. Scheduled upkeep
+## 9. Scheduled upkeep
 
 Orca automations run prompts on cron against a repo or workspace. Useful
 standing jobs:
@@ -229,7 +298,7 @@ standing jobs:
 - stale dispatch-branch cleanup,
 - issue triage from the tracker.
 
-## 9. Cost discipline
+## 10. Cost discipline
 
 - MCP schemas dominate worker bills: every active server ships its full tool
   schema every turn. Workers go light (code navigation and little else);
