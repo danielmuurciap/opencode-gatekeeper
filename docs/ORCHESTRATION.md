@@ -197,10 +197,24 @@ orca worktree create --name task --repo path:$REPO --agent opencode \
 `worker done` is a claim, not a verification. The gates already checked the
 mechanical part; what's left is yours:
 
-- **Read the diff** (Orca's diff viewer, or `orca file open-changed`).
+- **Read the diff** — `orca file open-changed --worktree "path:$WT"` opens
+  every changed file in Orca's editor, so the orchestrator can serve you the
+  review instead of you hunting for it.
 - Annotate line-by-line in Orca (hover → `+`, or press `c`), then **Send to
   agent**: Orca composes a single line-anchored prompt for the revision pass.
-  One review round, one revision round — no ping-pong.
+  One review round, one revision round — no ping-pong. This is the cheapest
+  correction channel there is: you point instead of describing, which removes
+  the step where a written brief has to re-identify the element in words.
+
+**UI verification without Playwright**: Orca's browser is per-worktree, so
+parallel dispatches each verify in their own tab (measured: two worktrees,
+two independent snapshots, simultaneously — the usual "one shared browser"
+bottleneck does not apply). `orca snapshot` returns the accessibility tree as
+text, which is cheap to assert on. See `examples/verify/ui-flow-orca.sh`.
+Two traps, both measured: `orca` can return **exit 0 with `"ok": false`** in
+the body (a gate must parse the JSON, never trust the exit code alone), and
+the snapshot mangles some non-ASCII (a literal `€` came back as `â‚¬`) — match
+on digits, not on symbols or accents.
 - The agent that implemented never audits its own work. If you want a second
   model's opinion, give the diff to a fresh agent without the implementation
   context in its window.
