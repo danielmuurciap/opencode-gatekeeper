@@ -127,6 +127,7 @@ roles of the review loop ("gauntlet") documented in
 | `implementer` | yes | fully-specified changes; **refuses** briefs missing the four parts |
 | `reviewer` | no | diff review with fresh eyes — the implementer never audits itself |
 | `test-runner` | no | runs suites, returns only failures — output stays out of your context |
+| `critic` | no | blind A/B judge vs a concrete reference, for opt-in gauntlet loops — never a default gate |
 
 ```
 # per project                              # per machine

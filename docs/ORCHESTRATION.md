@@ -271,12 +271,21 @@ Rules that keep the loop honest:
   eyes, they don't replace them. Orca's diff annotation (hover → `+`,
   Send to agent) is the last mile.
 
-What this loop deliberately does NOT include: an aesthetic/visual judge.
-Deterministic gates verify function; visual quality judged by a zero-shot
-model barely beats a coin flip (57.7% vs 50% in DesignPref's measurements
-against professional designers' preferences). That layer needs a corpus of
-your own accept/reject decisions first — build it as a separate stage, not
-as a default gate that ships noise with a verdict attached.
+What this loop deliberately does NOT include: an aesthetic/visual judge as
+a gate. A zero-shot model scoring visual quality in the absolute barely
+beats a coin flip (57.7% vs 50% in DesignPref's measurements against
+professional designers' preferences) — a default gate built on that ships
+noise with a verdict attached.
+
+The defensible form is **comparative**: a
+[gauntlet loop](https://somethingbig.ai/gauntlet-loop) where a fresh critic
+blind-compares the rendered artifact against a **concrete reference of
+excellent** (A/B in both orders — judges flip preference on order swap in
+~1/3 of cases), and returns the single biggest gap to the builder each
+round. Relative judgment is where models have signal; that's why UI-Bench
+is pairwise by design. Run it as an **opt-in command with an explicit
+reference and a hard round cap** — never as an ambient gate. The `critic`
+agent in `agents/` is the judge role for that loop.
 
 ## 8. Racing (optional, for the hard or ambiguous)
 
