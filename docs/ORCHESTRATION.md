@@ -24,15 +24,49 @@ suite, or repeating a pattern.
 
 ## 1. Spec before dispatch (SDD)
 
-For anything beyond a one-line fix, write the change down first — we use
-[OpenSpec](https://github.com/openspec) (`proposal.md` + `design.md` +
-`tasks.md`), but any format works if it answers three questions the brief
-will need: what is touched, what is NOT touched, and which decisions are
-already made.
+For anything beyond a one-line fix, write the change down first. We use
+[OpenSpec](https://github.com/Fission-AI/OpenSpec), but any format works if
+it answers the three questions every brief will need: **what is touched,
+what is NOT touched, and which decisions are already made**. Without that
+written down, every dispatch improvises its own scope — and a worker without
+a written boundary knocks down the neighboring wall because "it looked
+better that way".
 
-`tasks.md` is not a wishlist — **it is the dispatch queue**. If a task there
-can't be turned into a verifiable brief, the spec is unfinished; fix it
-before dispatching anything.
+The OpenSpec cycle, mapped to dispatching:
+
+```
+unclear request  → openspec explore     think out loud, clarify requirements
+clear request    → openspec propose     generates the change folder:
+                                          proposal.md   why + what changes
+                                          design.md     decisions, trade-offs
+                                          tasks.md      ← THE DISPATCH QUEUE
+each task        → worktree → brief → worker → gates    (sections 2–6)
+tasks done       → openspec apply       mark tasks complete against the spec
+change closed    → openspec archive     fold the delta into the living specs
+```
+
+(`openspec init --tools claude,opencode` sets a repo up; the CLI acts on the
+nearest `openspec/` directory. Agent-facing slash commands ship for Claude
+Code and OpenCode.)
+
+Three rules make this SDD instead of paperwork:
+
+- **`tasks.md` is the dispatch queue, not a wishlist.** If a task there
+  can't be turned into a verifiable brief — four parts, §2 — the spec is
+  unfinished. Fix the spec, don't improvise the brief.
+- **The spec is where decisions die.** `design.md` records what was decided
+  and why; the brief copies decisions from it. If a worker asks a question
+  mid-task, the answer belongs in `design.md` first, the brief second.
+- **Count before you start.** Read `tasks.md` and count: 3+ tasks, or 5+
+  files, or crossing subprojects → isolated worktrees per task, because a
+  change that size makes the main checkout unusable for anything else while
+  it lasts, and aborting means abandoning a worktree instead of reverting by
+  hand. Below that, a branch on the main checkout is fine. Tune the numbers
+  per repo; never skip the counting.
+
+When to skip all of it: a one-line fix with an obvious verification. The
+rule of thumb — if the work goes to a worker, it needs a spec; if you do it
+yourself in two minutes, it doesn't.
 
 ## 2. The brief: four things or it doesn't ship
 
@@ -54,33 +88,80 @@ worker off running the entire repo suite.
 
 ## 3. TDD, adapted: the dispatcher writes the exam
 
-Classic TDD says write the test first. With agents, the ordering is not the
-point — **the separation between examiner and examined is**. Measured: the
-same models that shipped broken code with a green self-report went 9/9 when
-the dispatcher wrote the test and seeded it before launch.
+Classic TDD is one person alternating roles: write the test, then write the
+code, and the value lives in the *ordering* — the test forces design
+thinking before typing. With agents the ordering is not the point.
+**The separation between examiner and examined is.**
+
+The evidence, from our own logs: given the same task as a prose brief, two
+cheap models shipped code that crashed **while reporting success** — and 43
+repo security guardians approved the broken code. Given the same task with
+the test written by the dispatcher and seeded before launch, four models
+(including both that had failed) went 9/9. Same models, same task; the only
+variable was who wrote the exam. A worker that writes its own test performs
+the entire TDD ritual and verifies nothing — the exam adapts to the code,
+which is precisely what TDD exists to prevent.
+
+What survives from classic TDD unchanged is **red-first**: run the exam
+before dispatching, and abort if it passes. A pre-green exam means it's
+tautological or the work already exists — either way, dispatching against
+it verifies nothing.
+
+What is *not* TDD at all: the exam doesn't guide the worker's design the
+way a TDD test guides a human's. It's an acceptance contract, closer to an
+externally-held integration test. And there is no red-green-refactor cycle
+inside the dispatch — it's a single shot: seed, dispatch, gate.
+
+The full sequence, end to end:
 
 ```bash
-# worktree with the agent waiting, no prompt yet
-orca worktree create --name task --repo path:$REPO --agent opencode --json
+REPO=~/code/myapp
 
-# seed the exam
-cp task.test.js $WT/
-echo 'task.test.js'      > $WT/.gatekeeper-protected
-echo 'node task.test.js' > $WT/.gatekeeper-verify
+# 1. Worktree with the agent waiting — no prompt yet, so the exam
+#    is in place before the worker's first token
+orca worktree create --name quota-fix --repo path:$REPO \
+     --agent opencode --json
+#    → WT=<worktree path>, HANDLE=<result.agentTerminalHandle>
 
-# RED FIRST: if the exam already passes, it's tautological or already done
-node $WT/task.test.js && echo "ABORT"
+# 2. Write the exam YOURSELF, at flow level, and seed it
+cat > $WT/quota.test.js <<'JS'
+import { getQuota } from "./src/quota.js"
+const q = await getQuota("tenant-a")          // named edge case: real tenant
+if (q.remaining !== q.limit - q.used) process.exit(1)
+const empty = await getQuota("tenant-none")   // named edge case: no rows
+if (empty.remaining !== empty.limit) process.exit(1)
+console.log("ok")
+JS
+echo 'quota.test.js'      > $WT/.gatekeeper-protected
+echo 'node quota.test.js' > $WT/.gatekeeper-verify
 
-# now the brief
-orca terminal send --terminal $HANDLE --text "…" --enter
+# 3. RED FIRST — the exam must fail before the worker starts
+(cd $WT && node quota.test.js) && { echo "ABORT: exam already green"; exit 1; }
+
+# 4. Validate the exam can catch a lie: if you can break the code and the
+#    exam stays green, the exam is decoration (mocks asserting mocks)
+
+# 5. Now, and only now, the brief
+orca terminal send --terminal $HANDLE --enter --text \
+  "Make quota.test.js pass with the minimum change. The bug: getQuota
+   ignores rows with NULL used. Touch only src/quota.js. Replicate the
+   null-handling pattern in src/limits.js. Do not modify quota.test.js.
+   Do not run the repo suite. Do not commit."
 ```
 
-Write the acceptance at **flow level, not piece level**: "the summary shows
-the new amount", not "component X exists". Piece-level checks pass on
-components nobody wired up. A Playwright flow test is the hardest to fake.
+When it finishes, gatekeeper checks — in this order, because each one
+invalidates the next — that the exam is **intact** (`protected_modified`:
+workers under pressure do edit exams; we caught one inlining the
+implementation into the test file to dodge a missing module, with `verify`
+showing green), that the exam **passes** (`verify`), and that the linter
+holds on touched files.
 
-Validate the exam itself before trusting it: break the code on purpose and
-watch the exam fail. An exam that can't fail verifies nothing.
+Write acceptance at **flow level, not piece level**: "the summary shows the
+new amount", not "component X exists" — piece-level checks pass on
+components nobody wired up. Cost the exam honestly: for logic it's minutes;
+for UI it feels expensive and is where it pays most (our worst retry
+hotspots were all UI tasks that a 20-minute Playwright flow test would have
+cut from 7–8 dispatch round-trips to 1–2).
 
 ## 4. Dispatch (all native Orca)
 
