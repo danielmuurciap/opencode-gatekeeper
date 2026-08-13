@@ -78,8 +78,9 @@ skip steps 2–3 and pass `--prompt` directly on `worktree create`.
 |---|---|---|
 | `wrote_nothing` | zero `file.edited` events | The most silent failure there is. Fix the brief, don't patch by hand. |
 | `committed` | HEAD moved | A commit breaks diff review; undo stops being `git checkout .` |
-| `protected_modified` | worker edited a path in `.gatekeeper-protected` | If the worker edits the exam, its green means nothing. `git status` can't catch this on untracked files — events can. |
+| `protected_modified` | worker edited a path in `.gatekeeper-protected` | If the worker edits the exam, its green means nothing. `git status` can't catch this on untracked files — events can. Catches **rewrites**, not deletions: a shell `rm` emits no `file.edited` event. |
 | `verify` / `verify_timeout` | `.gatekeeper-verify` exits non-zero / times out | Your acceptance boolean. **Timeout is reported separately — "not checked" is not "failed".** |
+| `verify_removed` | the exam was present at launch and gone at idle | Closes the hole `protected_modified` cannot see. Absence of evidence is a failure, same rule as `wrote_nothing`. |
 | `linter` | project's own eslint fails on touched files | Only touched files: whole-repo lint surfaces pre-existing noise that teaches people to ignore the gate. |
 | `syntax` / `invalid_json` / `invalid_bash` / `invalid_python` | fallback checks without node_modules | A gate that cannot run **never passes silently** — uncheckable files are counted and named. |
 
@@ -88,6 +89,18 @@ each one was made to fail on purpose before shipping, including a real
 exam-tampering case where the worker inlined the implementation into the test
 file — caught by `protected_modified` while `verify` showed green.
 
+### No exam is not a pass
+
+A dispatch with no `.gatekeeper-verify` used to reach the board as
+`✓ gates ok`. Measured over 239 real dispatches: **193 ran with no exam and
+116 of those were announced green.** Work nobody checked looked exactly like
+verified work on the one surface you actually watch.
+
+The board now says **`⚠ sin examen · solo gates parciales`**, and so does the
+desktop notification. It is not a failure — the other gates still run and still
+cut — it is a refusal to call *unchecked* the same thing as *checked*. The log
+already distinguished it as `gate: "no_gate"`; the board did not.
+
 ## The log
 
 One JSON line per dispatch in `~/.local/share/gatekeeper/dispatches.jsonl`:
@@ -95,9 +108,35 @@ One JSON line per dispatch in `~/.local/share/gatekeeper/dispatches.jsonl`:
 ```json
 { "ts": 1786466595, "name": "fix-quota", "model": "opencode-go/deepseek-v4-flash",
   "variant": "max", "exit": 0, "failure_reason": null, "gate": "verify:pass",
+  "base_tree": "3256d72...", "candidate_tree": "9dfe92d...",
+  "delivery_ref": "refs/gatekeeper/fix-quota/1786638153", "branch": "user/fix-quota",
   "duration_s": 96.4, "files": 3, "files_list": ["..."], "tokens": 812345,
   "cost_usd": 0.0031, "subsessions": 1, "session_id": "ses_...", "source": "gatekeeper" }
 ```
+
+### The frozen delivery
+
+`candidate_tree` is what the worker actually delivered, frozen as a real Git
+tree the moment the gates ran. The dirty worktree dies when you remove the
+worktree; this outlives it, so weeks later you can still ask whether that work
+landed intact, was edited on top of, or never landed at all — which makes the
+verdict **computable instead of self-reported**.
+
+How, borrowed from gentle-ai's `reviewtransaction/snapshot.go`: copy
+`.git/index` aside **preserving its mtime** (load-bearing — Git's racily-clean
+check keys off it, and without it `add -u` can reuse stale cached content and
+write a tree that doesn't match the files), then `GIT_INDEX_FILE=<tmp> git
+add -u` plus the untracked paths the worker touched, then `write-tree`. The
+live index and the worktree are never touched.
+
+A bare tree is unreachable and **`git gc --prune=now` deletes it** — measured;
+storing only the SHA would have been a perfectly silent data loss weeks later.
+So it is wrapped in a commit and anchored at `refs/gatekeeper/<task>/<ts>`,
+which survives both `gc` and `orca worktree rm`. `git diff <ref>^ <ref>` is the
+delivered diff.
+
+It measures whether code **survived**, not whether it was **good**: anything
+you merge without reading counts as accepted.
 
 `scripts/analyze.py` turns it into the numbers that matter: success rate per
 model/variant, cost concentration, retry hotspots, which gate cuts most.
