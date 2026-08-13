@@ -16,9 +16,9 @@
 // dispatch emitted 197 events and zero `session.idle`; a single status-idle
 // arrived as the last event. Orca's own status plugin calls status-idle the
 // canonical signal and session.idle the deprecated one.
-import { appendFileSync, existsSync, readFileSync, mkdirSync } from "fs"
+import { appendFileSync, existsSync, readFileSync, mkdirSync, copyFileSync, statSync, utimesSync, rmSync } from "fs"
 import { homedir } from "os"
-import { basename, dirname, extname, join } from "path"
+import { basename, dirname, extname, join, relative } from "path"
 
 // ── Configuration (env overrides) ────────────────────────────────────────────
 const LOG = process.env.GATEKEEPER_LOG || `${homedir()}/.local/share/gatekeeper/dispatches.jsonl`
@@ -65,6 +65,12 @@ export const Gatekeeper = async ({ $, directory }) => {
   try {
     initialHead = (await sh`git -C ${directory} rev-parse HEAD`).stdout.toString().trim()
   } catch {}
+
+  // Same reason, and `touched` cannot replace it: a shell `rm` emits no
+  // file.edited event, so deleting the exam is invisible to protected_modified
+  // even when the exam is listed there. Measured 13-ago-2026 — the worker
+  // removed a protected .gatekeeper-verify and the board said "✓ gates ok".
+  const hadVerify = existsSync(join(directory, VERIFY_FILE))
 
   const touched = new Set()
   let closed = false
@@ -143,6 +149,11 @@ export const Gatekeeper = async ({ $, directory }) => {
             verification = "pass"
           }
         }
+      } else if (hadVerify) {
+        // The exam was there at launch and is gone now. Absence of evidence is
+        // a failure, same rule as wrote_nothing — never a silent pass.
+        verification = "removed"
+        failures.push("verify_removed")
       }
 
       // ── Gate 4: the PROJECT's own linter, only on the files the worker
@@ -197,6 +208,81 @@ export const Gatekeeper = async ({ $, directory }) => {
       }
       if (unchecked) linter = linter ? `${linter}+${unchecked}_unchecked` : `${unchecked}_unchecked`
 
+      // ── Board status FIRST. The verdict is already decided here; the metrics
+      // below wait up to 9.5s for OpenCode's DB to catch up, and making the
+      // board wait with them delays the only thing you're watching for.
+      //
+      // No exam means nothing was checked — saying "gates ok" there is how a
+      // dispatch nobody verified ends up looking exactly like a verified one.
+      // Measured 13-ago-2026: 116 of 239 dispatches read "✓ gates ok" with
+      // gate "no_gate". The board is the surface you actually look at.
+      const note = failures.length
+        ? `✗ gates: ${failures.join(", ")} · ${touched.size} file(s)`
+        : verification
+          ? `✓ gates ok · ${touched.size} file(s) · ready for review`
+          : `⚠ sin examen · ${touched.size} file(s) · solo gates parciales`
+      try {
+        const status = failures.length ? "in-progress" : "in-review"
+        await sh`orca worktree set --worktree ${`path:${directory}`} --comment ${note} --workspace-status ${status} --json`
+      } catch {}
+
+      // ── Freeze what the worker delivered as a real Git tree object, so it can
+      // still be compared after the worktree is gone. Without this there is no
+      // way to tell later whether the work survived into the base branch, was
+      // edited on top, or was thrown away — the dirty tree dies with the
+      // worktree. Technique from gentle-ai (internal/reviewtransaction/
+      // snapshot.go): copy the index aside and work against the copy, so the
+      // live index and the worktree are never touched.
+      //
+      // Preserving the copied index's mtime is load-bearing, not tidiness:
+      // Git's racily-clean check keys off it, and without it `add -u` can reuse
+      // stale cached content and write a tree that doesn't match the files.
+      let baseTree = null
+      let candidateTree = null
+      let branchName = null
+      let deliveryRef = null
+      try {
+        branchName = (await sh`git -C ${directory} rev-parse --abbrev-ref HEAD`).stdout.toString().trim() || null
+        baseTree = (await sh`git -C ${directory} rev-parse HEAD^{tree}`).stdout.toString().trim() || null
+        const gitDir = (await sh`git -C ${directory} rev-parse --path-format=absolute --git-dir`).stdout.toString().trim()
+        const liveIndex = join(gitDir, "index")
+        const tmpIndex = join(gitDir, `gatekeeper-index-${sid}`)
+        if (existsSync(liveIndex)) {
+          copyFileSync(liveIndex, tmpIndex)
+          const st = statSync(liveIndex)
+          utimesSync(tmpIndex, st.atime, st.mtime)
+          // `env VAR=…` as an argv prefix rather than the shell's .env() helper:
+          // if that helper were missing or chained wrong the whole block would
+          // fall into the catch and silently record no tree at all.
+          const idx = `GIT_INDEX_FILE=${tmpIndex}`
+          // Tracked changes, then the untracked files the worker created.
+          // No -f: ignored files (node_modules, .env) are not part of delivery.
+          await sh`env ${idx} git -C ${directory} add -u -- .`
+          const rel = [...touched]
+            .map((p) => relative(directory, p))
+            .filter((p) => p && !p.startsWith(".."))
+          if (rel.length) await sh`env ${idx} git -C ${directory} add -- ${rel}`
+          const wt = await sh`env ${idx} git -C ${directory} write-tree`
+          candidateTree = wt.stdout.toString().trim() || null
+          rmSync(tmpIndex, { force: true })
+
+          // Anchor it. A bare tree object is unreachable, and `git gc` prunes
+          // it — measured: after `gc --prune=now` the tree was gone and the SHA
+          // in the log pointed at nothing. Wrapping it in a commit under
+          // refs/gatekeeper/ makes it survive, and gives `git diff <ref>^ <ref>`
+          // as the delivered diff for free.
+          if (candidateTree) {
+            const parent = initialHead ? ["-p", initialHead] : []
+            const c = await sh`git -C ${directory} commit-tree ${candidateTree} ${parent} -m ${`gatekeeper: ${basename(directory)} @ ${sid}`}`
+            const commit = c.stdout.toString().trim()
+            if (commit) {
+              deliveryRef = `refs/gatekeeper/${basename(directory)}/${Math.floor(Date.now() / 1000)}`
+              await sh`git -C ${directory} update-ref ${deliveryRef} ${commit}`
+            }
+          }
+        }
+      } catch {}
+
       // ── Metrics: the root session PLUS all descendants — a subagent costs
       // tokens too, and counting only the root under-reports every dispatch
       // that fanned out.
@@ -236,6 +322,13 @@ export const Gatekeeper = async ({ $, directory }) => {
         gate: verification ? `verify:${verification}` : "no_gate",
         protected: protectedList.length,
         linter,
+        // Frozen delivery. `candidate_tree` outlives the worktree, so weeks
+        // later you can still ask whether this work survived into the base
+        // branch, was edited on top of, or never landed at all.
+        base_tree: baseTree,
+        candidate_tree: candidateTree,
+        delivery_ref: deliveryRef,
+        branch: branchName,
         duration_s: m.duration_s ?? null,
         files: touched.size,
         files_list: [...touched],
@@ -250,20 +343,13 @@ export const Gatekeeper = async ({ $, directory }) => {
         appendFileSync(LOG, JSON.stringify(row) + "\n")
       } catch {}
 
-      // Board status: the Orca app becomes the dispatch board. Gates pass →
-      // in-review (ready for human eyes); gates fail → stays in-progress and
-      // the comment says WHY, so you fix the brief without digging in the log.
-      try {
-        const status = failures.length ? "in-progress" : "in-review"
-        const note = failures.length
-          ? `✗ gates: ${failures.join(", ")} · ${touched.size} file(s)`
-          : `✓ gates ok · ${touched.size} file(s) · ready for review`
-        await sh`orca worktree set --worktree ${`path:${directory}`} --comment ${note} --workspace-status ${status} --json`
-      } catch {}
-
       if (NOTIFY && process.platform === "darwin") {
         const cost = row.cost_usd ? `$${row.cost_usd.toFixed(4)}` : "free"
-        const title = failures.length ? `✗ ${row.name} — ${failures.join(", ")}` : `✓ ${row.name}`
+        const title = failures.length
+          ? `✗ ${row.name} — ${failures.join(", ")}`
+          : verification
+            ? `✓ ${row.name}`
+            : `⚠ ${row.name} — sin examen`
         const body = `${row.files} file(s) · ${Math.round(row.duration_s ?? 0)}s · ${cost}`
         const sound = failures.length ? "Basso" : "Glass"
         try {
