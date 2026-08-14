@@ -101,6 +101,19 @@ desktop notification. It is not a failure — the other gates still run and stil
 cut — it is a refusal to call *unchecked* the same thing as *checked*. The log
 already distinguished it as `gate: "no_gate"`; the board did not.
 
+### Nor is a stale verdict a pass
+
+The board comment is written when a dispatch **closes**. Reuse a worktree — a
+follow-up turn, a second dispatch — and until the new run finished the card kept
+showing the previous run's `✓ gates ok`: a green that belongs to someone else's
+work, on a worker that had not written a line yet. Reported from a real dispatch
+where it cost real time.
+
+The plugin now clears it on the first `busy` of each run
+(`⋯ trabajando · veredicto anterior descartado`, status `in-progress`) and the
+real verdict replaces it on close. Verified live: `✓ gates ok` → `⋯ trabajando`
+4s after the brief landed → new `✓ gates ok` on close.
+
 ## The log
 
 One JSON line per dispatch in `~/.local/share/gatekeeper/dispatches.jsonl`:
