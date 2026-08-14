@@ -122,6 +122,47 @@ achievement, so it passes trivially on any change that does not break the
 baseline. A task-specific exam in the brief intentionally overrides it and
 becomes the real bar.
 
+Seed it from `orca.yaml` at the repo root, so it lands in every worktree Orca
+creates — CLI, issue drawer, automation or the mobile companion alike:
+
+```yaml
+scripts:
+  setup: |
+    set -e
+    printf 'npm run lint --silent\n' > .gatekeeper-verify
+    printf '.gatekeeper-verify\n.gatekeeper-protected\n' > .gatekeeper-protected
+```
+
+Two conditions, both of which cost us a debugging round: `orca.yaml` must be
+**pushed** (a worktree is cut from the remote branch, so a local-only commit
+isn't there), and the repo must not be set to
+`hookSettings.commandSourcePolicy: "local-only"` — under that policy `scripts:`
+is ignored **with no error**.
+
+## The silence of a worker is not success
+
+Gates fire when a dispatch ends. Nothing fires when it never ends — a worker
+sitting on an unanswered permission prompt looks exactly like a worker thinking
+hard. Orca already knows the difference and `orca worktree ps --json` already
+says so: `status` is the max over its panes
+(`inactive < active < done < working < permission`), and each agent carries
+`state` (`working|blocked|waiting|done`) with `stateStartedAt`.
+
+[`scripts/watch-dispatches.sh`](scripts/watch-dispatches.sh) boils that down to
+one line per worktree that needs a human, and prints nothing when nothing does.
+It exits **0 when it found something** — inverted on purpose, so it can be the
+`--precheck` of an Orca automation.
+
+```
+$ scripts/watch-dispatches.sh 15
+ESPERANDO  fix-quota    7 min   HOKENFI   cpu 1.2   waiting
+COLGADO    kyb-import   41 min  HOKENFI   cpu 0.4   sin cambio de estado
+```
+
+The CPU column comes from `orca diagnostics memory` — a second signal that does
+not depend on the status hooks at all. 63% is real work; 1% next to a `working`
+pane is a corpse.
+
 ## The log
 
 One JSON line per dispatch in `~/.local/share/gatekeeper/dispatches.jsonl`:
