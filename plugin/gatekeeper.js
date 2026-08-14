@@ -474,19 +474,21 @@ export const Gatekeeper = async ({ $, directory }) => {
         } catch {}
       }
 
-      if (NOTIFY && process.platform === "darwin") {
+      // Only ring when the answer changes what you do. Orca's own
+      // agentTaskComplete already fires at idle for every dispatch, so a clean
+      // pass would be the second sound saying the same "it's done, nothing to
+      // decide" — and two sounds for "all good" is how you learn to ignore the
+      // one that isn't. A handed-back round is not waiting for you either.
+      // What still rings: a real failure, and a pass nobody verified.
+      const worthRinging = (failures.length && !willFeedback) || (!failures.length && !verification)
+
+      if (NOTIFY && worthRinging && process.platform === "darwin") {
         const cost = row.cost_usd ? `$${row.cost_usd.toFixed(4)}` : "free"
-        // A round that was handed back needs no alarm: nothing is waiting for
-        // you yet. Ringing Basso on it trains you to ignore the ones that are.
-        const title = willFeedback
-          ? `↻ ${row.name} — corrigiendo ${round}/${MAX_ROUNDS}`
-          : failures.length
-            ? `✗ ${row.name} — ${failures.join(", ")}`
-            : verification
-              ? `✓ ${row.name}`
-              : `⚠ ${row.name} — sin examen`
+        const title = failures.length
+          ? `✗ ${row.name} — ${failures.join(", ")}`
+          : `⚠ ${row.name} — sin examen`
         const body = `${row.files} file(s) · ${Math.round(row.duration_s ?? 0)}s · ${cost}`
-        const sound = willFeedback ? "Pop" : failures.length ? "Basso" : "Glass"
+        const sound = failures.length ? "Basso" : "Glass"
         try {
           await sh`osascript -e ${`display notification "${body}" with title "${title}" sound name "${sound}"`}`
         } catch {}

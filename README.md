@@ -270,6 +270,12 @@ Environment variables (set them where OpenCode runs):
 | `GATEKEEPER_FEEDBACK` | on | `0` disables handing failures back |
 | `GATEKEEPER_MAX_ROUNDS` | `2` | correction rounds offered per session |
 
+Notifications only fire when the answer changes what you do: a real failure, or
+a pass nobody verified. A clean pass stays silent because Orca's own
+`agentTaskComplete` already rang at idle, and two sounds for "all good" is how
+you learn to ignore the one that isn't. A handed-back round is silent too —
+nothing is waiting for you yet. The verdict is always on the board regardless.
+
 ## Agents
 
 Four ready-to-use OpenCode agent definitions in [`agents/`](agents/) — the
