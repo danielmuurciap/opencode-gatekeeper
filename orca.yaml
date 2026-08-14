@@ -12,5 +12,7 @@ scripts:
     # (El examen especifico de una tarea es el contrario: rojo antes, verde
     # despues. Cuando el despachador siembre uno, pisa este a proposito — y le
     # toca incluir esta comprobacion dentro.)
-    printf 'node --check plugin/gatekeeper.js\n' > .gatekeeper-verify
+    # La primera linea marca el examen como base: el plugin lo dice en el
+    # tablero, para que un verde de no-regresion no se lea como uno de tarea.
+    printf '# gatekeeper:baseline\nnode --check plugin/gatekeeper.js\n' > .gatekeeper-verify
     printf '.gatekeeper-verify\n.gatekeeper-protected\n' > .gatekeeper-protected

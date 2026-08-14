@@ -148,8 +148,17 @@ export const Gatekeeper = async ({ $, directory }) => {
       // not exist.
       const verifyPath = join(directory, VERIFY_FILE)
       let verification = null
+      let baseline = false
       if (existsSync(verifyPath)) {
-        const cmd = readFileSync(verifyPath, "utf8").trim()
+        const raw = readFileSync(verifyPath, "utf8")
+        // A repo-seeded baseline exam measures non-regression, not achievement:
+        // it was green before the work started, so passing it proves far less
+        // than passing an exam written for this task. Both would otherwise
+        // reach the board as the same "✓ gates ok" — which is the very failure
+        // "no exam is not a pass" fixed, walking back in through the door we
+        // opened by seeding a default. The seeder marks it; we say which it was.
+        baseline = /^#\s*gatekeeper:baseline\b/m.test(raw)
+        const cmd = raw.trim()
         if (cmd) {
           const r = await sh`timeout ${String(VERIFY_TIMEOUT)} sh -c ${`cd ${directory} && ${cmd}`}`
           if (r.exitCode === 124) {
@@ -232,7 +241,9 @@ export const Gatekeeper = async ({ $, directory }) => {
       const note = failures.length
         ? `✗ gates: ${failures.join(", ")} · ${touched.size} file(s)`
         : verification
-          ? `✓ gates ok · ${touched.size} file(s) · ready for review`
+          ? baseline
+            ? `✓ examen base · ${touched.size} file(s) · sin examen de tarea`
+            : `✓ gates ok · ${touched.size} file(s) · ready for review`
           : `⚠ sin examen · ${touched.size} file(s) · solo gates parciales`
       try {
         const status = failures.length ? "in-progress" : "in-review"
@@ -332,7 +343,7 @@ export const Gatekeeper = async ({ $, directory }) => {
         dir: directory,
         exit: failures.length ? 1 : 0,
         failure_reason: failures.length ? failures.join(",") : null,
-        gate: verification ? `verify:${verification}` : "no_gate",
+        gate: verification ? `verify${baseline ? ":baseline" : ""}:${verification}` : "no_gate",
         protected: protectedList.length,
         linter,
         // Frozen delivery. `candidate_tree` outlives the worktree, so weeks
