@@ -114,6 +114,14 @@ The plugin now clears it on the first `busy` of each run
 real verdict replaces it on close. Verified live: `✓ gates ok` → `⋯ trabajando`
 4s after the brief landed → new `✓ gates ok` on close.
 
+### The baseline exam
+
+`orca.yaml` seeds a baseline exam into every worktree. It measures
+non-regression — the tree stays green before and after the work — not
+achievement, so it passes trivially on any change that does not break the
+baseline. A task-specific exam in the brief intentionally overrides it and
+becomes the real bar.
+
 ## The log
 
 One JSON line per dispatch in `~/.local/share/gatekeeper/dispatches.jsonl`:
