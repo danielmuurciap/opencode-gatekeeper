@@ -74,6 +74,7 @@ export const Gatekeeper = async ({ $, directory }) => {
 
   const touched = new Set()
   let closed = false
+  let marcadoEnCurso = false
 
   return {
     event: async ({ event }) => {
@@ -86,6 +87,17 @@ export const Gatekeeper = async ({ $, directory }) => {
       // gated on its first turn and every later turn would pass unchecked.
       if (event.properties?.status?.type === "busy") {
         closed = false
+        // Clear the previous verdict from the board. The comment is only
+        // written when a dispatch CLOSES, so a reused worktree kept showing
+        // "✓ gates ok" from the run before while the new worker was still
+        // working — a green that belongs to someone else's work. Reported
+        // from a real dispatch, 13-ago-2026.
+        if (!marcadoEnCurso) {
+          marcadoEnCurso = true
+          try {
+            await sh`orca worktree set --worktree ${`path:${directory}`} --comment ${"⋯ trabajando · veredicto anterior descartado"} --workspace-status in-progress --json`
+          } catch {}
+        }
         return
       }
       if (event.properties?.status?.type !== "idle" || closed) return
@@ -101,6 +113,7 @@ export const Gatekeeper = async ({ $, directory }) => {
       } catch {}
 
       closed = true
+      marcadoEnCurso = false   // el próximo turno vuelve a limpiar el veredicto
       const failures = []
 
       // ── Gate 1: writing nothing is a FAILURE, not a silent success.
