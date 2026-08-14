@@ -87,6 +87,35 @@ skip steps 2–3 and pass `--prompt` directly on `worktree create`.
 | `linter` | project's own eslint fails on touched files | Only touched files: whole-repo lint surfaces pre-existing noise that teaches people to ignore the gate. |
 | `syntax` / `invalid_json` / `invalid_bash` / `invalid_python` | fallback checks without node_modules | A gate that cannot run **never passes silently** — uncheckable files are counted and named. |
 
+### The failure goes back to the worker
+
+A gate that runs after the worker left teaches nobody. When a dispatch fails,
+the real output is written to `.gatekeeper-failure.txt` and handed back to the
+same session, which fixes itself and gets re-gated. **Capped at 2 rounds** —
+that is where the measured gain lives.
+
+Only failures the worker can act on come back: `verify`, `linter`, `syntax`,
+`invalid_*`. `wrote_nothing` and `committed` are a bad brief and bad process —
+fix the brief. `protected_modified` and `verify_removed` are cheating already
+caught, and replaying them would be coaching a retry. `verify_timeout` measured
+nothing, so there is nothing to hand back.
+
+The board says which is which: `↻ ronda 1/2 · devuelto al worker` is not `✗
+gates`. A red that is about to fix itself must not look like a red waiting for
+you, and its notification does not sound like an alarm either. The log rows
+carry `round` and `feedback`, so a dispatch that self-corrected stops being
+indistinguishable from one that got it right the first time.
+
+Two things measured while building it, both non-obvious:
+
+- **A multi-line `orca terminal send --text` never reaches the model.** The TUI
+  passes it through to the shell, which answered `command not found: El` to the
+  first word of the message — twice — while the board kept reporting an ordinary
+  verify failure. One-line sends land correctly, hence the file.
+- **The terminal to write back to is `ORCA_TERMINAL_HANDLE`**, already in the
+  plugin's own environment and equal to the `agentTerminalHandle` the worktree
+  creator receives. No listing, no guessing which pane is the agent.
+
 All eight gates (plus the pass-through control) are covered by break-tests:
 each one was made to fail on purpose before shipping, including a real
 exam-tampering case where the worker inlined the implementation into the test
@@ -172,6 +201,20 @@ The CPU column comes from `orca diagnostics memory` — a second signal that doe
 not depend on the status hooks at all. 63% is real work; 1% next to a `working`
 pane is a corpse.
 
+A watcher you have to remember to run is not a watcher: it needs you to think of
+it, which is exactly what a stalled worker prevents.
+[`scripts/notify-stalled.sh`](scripts/notify-stalled.sh) wraps it and raises a
+desktop notification, driven by the LaunchAgent in
+[`scripts/com.danielmurcia.vigilar-despachos.plist`](scripts/com.danielmurcia.vigilar-despachos.plist)
+every 10 minutes. The dedup signature carries the half-hour bucket, so the same
+stalled worker keeps insisting without hammering — an alert that hammers gets
+muted, and a muted alert reports nothing ever again.
+
+Not an Orca automation, despite the `--precheck` the watcher was shaped for:
+`automations create` requires `--prompt` and `--provider`, so it always launches
+an agent. Spending a model to learn that a worker is stuck costs tokens and adds
+a worktree to the board.
+
 ## The log
 
 One JSON line per dispatch in `~/.local/share/gatekeeper/dispatches.jsonl`:
@@ -224,6 +267,8 @@ Environment variables (set them where OpenCode runs):
 | `GATEKEEPER_NOTIFY` | on | `0` disables desktop notifications |
 | `GATEKEEPER_VERIFY_TIMEOUT` | `300` | seconds for the acceptance command |
 | `GATEKEEPER_DB` | `~/.local/share/opencode/opencode.db` | OpenCode's DB |
+| `GATEKEEPER_FEEDBACK` | on | `0` disables handing failures back |
+| `GATEKEEPER_MAX_ROUNDS` | `2` | correction rounds offered per session |
 
 ## Agents
 
