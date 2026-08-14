@@ -16,7 +16,7 @@
 // dispatch emitted 197 events and zero `session.idle`; a single status-idle
 // arrived as the last event. Orca's own status plugin calls status-idle the
 // canonical signal and session.idle the deprecated one.
-import { appendFileSync, existsSync, readFileSync, mkdirSync, copyFileSync, statSync, utimesSync, rmSync } from "fs"
+import { appendFileSync, existsSync, readFileSync, writeFileSync, mkdirSync, copyFileSync, statSync, utimesSync, rmSync } from "fs"
 import { homedir } from "os"
 import { basename, dirname, extname, join, relative } from "path"
 
@@ -25,6 +25,34 @@ const LOG = process.env.GATEKEEPER_LOG || `${homedir()}/.local/share/gatekeeper/
 const DB = process.env.GATEKEEPER_DB || `${homedir()}/.local/share/opencode/opencode.db`
 const NOTIFY = process.env.GATEKEEPER_NOTIFY !== "0"
 const VERIFY_TIMEOUT = Number(process.env.GATEKEEPER_VERIFY_TIMEOUT || 300)
+
+// ── Feedback loop ────────────────────────────────────────────────────────────
+// A gate that runs after the worker left teaches nobody. Handing the real
+// failure back to the same session and letting it fix itself is worth between
+// +5 and +30 points depending on the benchmark, and nearly all of that lands
+// in the first two rounds — hence the default cap of 2.
+//
+// Only failures the worker can actually act on are fed back. `wrote_nothing`
+// and `committed` are bad briefs and bad process, not bugs: the rule is fix
+// the brief and re-dispatch. `protected_modified` and `verify_removed` are
+// cheating already detected — replaying them would just be coaching a retry.
+// `verify_timeout` says nothing was measured, so there is nothing to hand back.
+const FEEDBACK = process.env.GATEKEEPER_FEEDBACK !== "0"
+const MAX_ROUNDS = Number(process.env.GATEKEEPER_MAX_ROUNDS || 2)
+const FEEDABLE = new Set(["verify", "linter", "syntax", "invalid_json", "invalid_bash", "invalid_python"])
+
+// Runners put the failure at the end. Head-truncating a 4000-line test log
+// would hand back the part that says everything is fine.
+const tail = (s, lines = 40, chars = 3000) => {
+  const t = (s || "").trim().split("\n").slice(-lines).join("\n")
+  return t.length > chars ? "…\n" + t.slice(-chars) : t
+}
+
+// Evidence is arbitrary test output that ends up in a file the worker reads.
+// Prefixing every line keeps it visibly quoted — a line starting with `$`, `!`
+// or `/` reads like an instruction, and the point of handing back evidence is
+// that the worker treats it as a symptom, not as an order.
+const quote = (s) => s.split("\n").map((l) => `| ${l}`).join("\n")
 
 // Files the dispatcher seeds INSIDE the worktree before (or while) the worker
 // runs. The worker is free to read them; the gates are what make lying about
@@ -36,6 +64,10 @@ const VERIFY_TIMEOUT = Number(process.env.GATEKEEPER_VERIFY_TIMEOUT || 300)
 //                           edits the exam, its green means nothing.
 const VERIFY_FILE = ".gatekeeper-verify"
 const PROTECTED_FILE = ".gatekeeper-protected"
+//   .gatekeeper-failure   — written BY the plugin when a gate fails and the
+//                           failure is handed back: the full output the worker
+//                           has to read. Rewritten each round.
+const FAILURE_FILE = ".gatekeeper-failure.txt"
 
 const WEB = [".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".vue", ".svelte"]
 const wait = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -75,6 +107,9 @@ export const Gatekeeper = async ({ $, directory }) => {
   const touched = new Set()
   let closed = false
   let marcadoEnCurso = false
+  // Rounds already handed back to THIS session. Lives in the closure, so it
+  // resets when the worker is relaunched — a fresh dispatch gets a fresh cap.
+  let round = 0
 
   return {
     event: async ({ event }) => {
@@ -95,7 +130,8 @@ export const Gatekeeper = async ({ $, directory }) => {
         if (!marcadoEnCurso) {
           marcadoEnCurso = true
           try {
-            await sh`orca worktree set --worktree ${`path:${directory}`} --comment ${"⋯ trabajando · veredicto anterior descartado"} --workspace-status in-progress --json`
+            const t = round ? `⋯ corrigiendo · ronda ${round}/${MAX_ROUNDS}` : "⋯ trabajando · veredicto anterior descartado"
+            await sh`orca worktree set --worktree ${`path:${directory}`} --comment ${t} --workspace-status in-progress --json`
           } catch {}
         }
         return
@@ -149,6 +185,10 @@ export const Gatekeeper = async ({ $, directory }) => {
       const verifyPath = join(directory, VERIFY_FILE)
       let verification = null
       let baseline = false
+      // What the gate actually printed, kept to hand back. Without this the
+      // worker would only learn the NAME of the gate it failed, which is the
+      // one thing it cannot act on.
+      const evidence = []
       if (existsSync(verifyPath)) {
         const raw = readFileSync(verifyPath, "utf8")
         // A repo-seeded baseline exam measures non-regression, not achievement:
@@ -167,6 +207,7 @@ export const Gatekeeper = async ({ $, directory }) => {
           } else if (r.exitCode !== 0) {
             verification = "fail"
             failures.push("verify")
+            evidence.push(quote(`comando: ${cmd}\n${tail(r.stdout?.toString() + "\n" + r.stderr?.toString())}`))
           } else {
             verification = "pass"
           }
@@ -193,7 +234,10 @@ export const Gatekeeper = async ({ $, directory }) => {
       if (web.length && existsSync(eslint)) {
         const r = await sh`${eslint} ${web}`
         linter = r.exitCode === 0 ? "pass" : "fail"
-        if (r.exitCode !== 0) failures.push("linter")
+        if (r.exitCode !== 0) {
+          failures.push("linter")
+          evidence.push(quote(`comando: eslint\n${tail(r.stdout?.toString() + "\n" + r.stderr?.toString())}`))
+        }
       } else if (web.length) {
         // No node_modules (worktree created with setup skipped). The base
         // repo's eslint does NOT work across worktrees — ESM module resolution
@@ -205,6 +249,7 @@ export const Gatekeeper = async ({ $, directory }) => {
           if (r.exitCode !== 0) {
             linter = "fail"
             if (!failures.includes("syntax")) failures.push("syntax")
+            evidence.push(quote(`comando: node --check ${relative(directory, p)}\n${tail(r.stderr?.toString(), 15)}`))
           }
         }
         unchecked += web.length - plain.length
@@ -217,15 +262,22 @@ export const Gatekeeper = async ({ $, directory }) => {
         if (ext === ".json") {
           try {
             JSON.parse(readFileSync(p, "utf8"))
-          } catch {
+          } catch (e) {
             if (!failures.includes("invalid_json")) failures.push("invalid_json")
+            evidence.push(quote(`comando: JSON.parse ${relative(directory, p)}\n${e.message}`))
           }
         } else if (ext === ".sh" || ext === ".bash") {
           const r = await sh`bash -n ${p}`
-          if (r.exitCode !== 0 && !failures.includes("invalid_bash")) failures.push("invalid_bash")
+          if (r.exitCode !== 0) {
+            if (!failures.includes("invalid_bash")) failures.push("invalid_bash")
+            evidence.push(quote(`comando: bash -n ${relative(directory, p)}\n${tail(r.stderr?.toString(), 15)}`))
+          }
         } else if (ext === ".py") {
           const r = await sh`python3 -m py_compile ${p}`
-          if (r.exitCode !== 0 && !failures.includes("invalid_python")) failures.push("invalid_python")
+          if (r.exitCode !== 0) {
+            if (!failures.includes("invalid_python")) failures.push("invalid_python")
+            evidence.push(quote(`comando: python3 -m py_compile ${relative(directory, p)}\n${tail(r.stderr?.toString(), 15)}`))
+          }
         }
       }
       if (unchecked) linter = linter ? `${linter}+${unchecked}_unchecked` : `${unchecked}_unchecked`
@@ -238,13 +290,24 @@ export const Gatekeeper = async ({ $, directory }) => {
       // dispatch nobody verified ends up looking exactly like a verified one.
       // Measured 13-ago-2026: 116 of 239 dispatches read "✓ gates ok" with
       // gate "no_gate". The board is the surface you actually look at.
-      const note = failures.length
-        ? `✗ gates: ${failures.join(", ")} · ${touched.size} file(s)`
-        : verification
-          ? baseline
-            ? `✓ examen base · ${touched.size} file(s) · sin examen de tarea`
-            : `✓ gates ok · ${touched.size} file(s) · ready for review`
-          : `⚠ sin examen · ${touched.size} file(s) · solo gates parciales`
+      //
+      // A red that is about to fix itself must not look like a red waiting for
+      // you. `↻ ronda` is the difference between "go look at it" and "leave it
+      // alone for one more turn".
+      const feedable = failures.length > 0 && failures.every((f) => FEEDABLE.has(f.split(":")[0]))
+      const willFeedback =
+        FEEDBACK && feedable && evidence.length > 0 &&
+        round < MAX_ROUNDS && !!process.env.ORCA_TERMINAL_HANDLE
+
+      const note = willFeedback
+        ? `↻ ronda ${round + 1}/${MAX_ROUNDS} · ${failures.join(", ")} · devuelto al worker`
+        : failures.length
+          ? `✗ gates: ${failures.join(", ")} · ${touched.size} file(s)`
+          : verification
+            ? baseline
+              ? `✓ examen base · ${touched.size} file(s) · sin examen de tarea`
+              : `✓ gates ok · ${touched.size} file(s) · ready for review`
+            : `⚠ sin examen · ${touched.size} file(s) · solo gates parciales`
       try {
         const status = failures.length ? "in-progress" : "in-review"
         await sh`orca worktree set --worktree ${`path:${directory}`} --comment ${note} --workspace-status ${status} --json`
@@ -346,6 +409,12 @@ export const Gatekeeper = async ({ $, directory }) => {
         gate: verification ? `verify${baseline ? ":baseline" : ""}:${verification}` : "no_gate",
         protected: protectedList.length,
         linter,
+        // Which correction round produced this row, and whether the failure was
+        // handed back. Without them a self-corrected dispatch is indistinguishable
+        // from one that got it right the first time — and the difference is the
+        // whole point of measuring the loop.
+        round: round + 1,
+        feedback: willFeedback,
         // Frozen delivery. `candidate_tree` outlives the worktree, so weeks
         // later you can still ask whether this work survived into the base
         // branch, was edited on top of, or never landed at all.
@@ -367,15 +436,57 @@ export const Gatekeeper = async ({ $, directory }) => {
         appendFileSync(LOG, JSON.stringify(row) + "\n")
       } catch {}
 
+      // ── Hand the failure back. Last, on purpose: the delivery tree and the
+      // log row for THIS round are already frozen, so restarting the worker
+      // cannot blur them into the next one.
+      //
+      // The escape-hatch sentence is not politeness. Frontier agents route
+      // around read-only files 40–94% of the time — not by editing them, but by
+      // adding a conftest, a global monkeypatch, or patching cached bytecode
+      // next to them. Of every mitigation tested, an explicit "stop and tell me"
+      // was the only one that took evasion to zero. It matters more here than
+      // in the brief: a worker being told "you failed, fix it" is exactly the
+      // worker under pressure to find a shortcut. And OpenCode workers have no
+      // hook to inject it, so this is the only place they ever hear it.
+      if (willFeedback) {
+        round++
+        // The evidence goes to a FILE and the prompt is a single line. Measured
+        // 14-ago-2026, twice: a multi-line --text never reaches the model — the
+        // TUI passes it through to the shell, which answered `command not found:
+        // El` to the first word of the message. One-line sends land correctly.
+        // Writing it out also removes the size limit and the escaping problem,
+        // and the file never enters the delivery tree (it is neither tracked nor
+        // in `touched`), so it cannot pollute the diff under review.
+        const body = [
+          `Gate fallido: ${failures.join(", ")}   ·   corrección automática ${round}/${MAX_ROUNDS}`,
+          "",
+          evidence.join("\n\n"),
+        ].join("\n")
+        try {
+          writeFileSync(join(directory, FAILURE_FILE), body + "\n")
+        } catch {}
+        const msg =
+          `El gate automático falló al terminar tu turno (${failures.join(", ")}); no es opinión, es la salida real y la tienes entera en ${FAILURE_FILE}: léela, arregla el código y termina. ` +
+          `No toques el examen ni ningún fichero protegido. Si para que pase necesitas tocar un fichero protegido, o añadir algo que cambie cómo se ejecuta (un conftest, un mock global, config de test): PARA Y AVISA, no lo rodees. ` +
+          `Si crees que el examen está mal, dilo y no sigas. Corrección automática ${round} de ${MAX_ROUNDS}.`
+        try {
+          await sh`orca terminal send --terminal ${process.env.ORCA_TERMINAL_HANDLE} --text ${msg} --enter --json`
+        } catch {}
+      }
+
       if (NOTIFY && process.platform === "darwin") {
         const cost = row.cost_usd ? `$${row.cost_usd.toFixed(4)}` : "free"
-        const title = failures.length
-          ? `✗ ${row.name} — ${failures.join(", ")}`
-          : verification
-            ? `✓ ${row.name}`
-            : `⚠ ${row.name} — sin examen`
+        // A round that was handed back needs no alarm: nothing is waiting for
+        // you yet. Ringing Basso on it trains you to ignore the ones that are.
+        const title = willFeedback
+          ? `↻ ${row.name} — corrigiendo ${round}/${MAX_ROUNDS}`
+          : failures.length
+            ? `✗ ${row.name} — ${failures.join(", ")}`
+            : verification
+              ? `✓ ${row.name}`
+              : `⚠ ${row.name} — sin examen`
         const body = `${row.files} file(s) · ${Math.round(row.duration_s ?? 0)}s · ${cost}`
-        const sound = failures.length ? "Basso" : "Glass"
+        const sound = willFeedback ? "Pop" : failures.length ? "Basso" : "Glass"
         try {
           await sh`osascript -e ${`display notification "${body}" with title "${title}" sound name "${sound}"`}`
         } catch {}
