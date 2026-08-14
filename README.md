@@ -116,10 +116,41 @@ Two things measured while building it, both non-obvious:
   plugin's own environment and equal to the `agentTerminalHandle` the worktree
   creator receives. No listing, no guessing which pane is the agent.
 
-All eight gates (plus the pass-through control) are covered by break-tests:
-each one was made to fail on purpose before shipping, including a real
-exam-tampering case where the worker inlined the implementation into the test
-file — caught by `protected_modified` while `verify` showed green.
+### The plugin verifies itself
+
+`test/gatekeeper.test.mjs` covers every gate. `test/harness.mjs` runs the plugin
+against a real derived git worktree in ~2s per case instead of a two-minute real
+dispatch: git runs for real (the activation check and the delivery freeze are
+pure git, so faking it would skip what breaks most), while orca and sqlite3 are
+intercepted and recorded.
+
+The acceptance command is **not** the suite. `scripts/mutantes.sh` breaks the
+plugin eleven ways on purpose and demands the suite notice each one:
+
+```
+$ scripts/mutantes.sh
+── suite sin mutar
+✓ verde en limpio
+✓ cazada: wrote_nothing nunca dispara
+✓ cazada: expirar se reporta como fallar
+✓ cazada: el tope de rondas desaparece
+…
+las 11 mutaciones cazadas
+```
+
+A suite written against existing code passes by construction: it describes what
+the code does, goes green, reports nothing, and freezes today's bugs as the
+specification. Mutation is the only check that tells the two apart. Two of the
+eleven were added by triangulating after a clean 9/9 — and both survived, which
+is exactly what triangulating is for.
+
+Every mutation is verified applied before anything runs: a replacement that
+misses its pattern leaves the code intact, the suite passes, and it looks like
+the suite is useless when what failed was the check.
+
+`node --check` used to be the repo's baseline exam; it is now the suite (23s).
+The mutation run stays out of the gate — at ~4 min it would graze the 300s
+`GATEKEEPER_VERIFY_TIMEOUT`.
 
 ### No exam is not a pass
 

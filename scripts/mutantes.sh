@@ -17,15 +17,31 @@ set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 PLUGIN=plugin/gatekeeper.js
-SUITE="node --test test/"
+# El glob explicito, no `node --test test/`: en Node 25 eso intenta cargar el
+# DIRECTORIO como modulo CJS y responde MODULE_NOT_FOUND. Ese rojo se parece al
+# de "no existe la suite" y me lo trague al validar el examen — dos rondas
+# suspendiendo a un worker cuya suite pasaba 11 de 11. Leer el rojo, no contarlo.
+suite() { node --test test/*.test.mjs; }
+# Cerrojo: este examen MUTA un fichero compartido. Dos ejecuciones a la vez se
+# pisan y el `trap restaurar` de una repone una copia que la otra ya habia
+# mutado — el plugin queda roto en el arbol de trabajo y nadie se entera.
+# Medido 14-ago-2026: lo corri mientras el worker lo corria en el mismo worktree
+# y quedo la mutacion `baseline = false &&` viva en plugin/gatekeeper.js.
+LOCK=.mutantes.lock
+if ! mkdir "$LOCK" 2>/dev/null; then
+  echo "✗ ya hay un scripts/mutantes.sh corriendo aqui (existe $LOCK)"
+  echo "  si estas seguro de que no, borra el directorio y repite"
+  exit 1
+fi
+
 COPIA=$(mktemp)
 cp "$PLUGIN" "$COPIA"
-restaurar() { cp "$COPIA" "$PLUGIN"; rm -f "$COPIA"; }
+restaurar() { cp "$COPIA" "$PLUGIN"; rm -f "$COPIA"; rmdir "$LOCK" 2>/dev/null; }
 trap restaurar EXIT
 
 # ── Paso 1: en limpio la suite tiene que pasar ───────────────────────────────
 echo "── suite sin mutar"
-if ! $SUITE >/tmp/gk-limpio.log 2>&1; then
+if ! suite >/tmp/gk-limpio.log 2>&1; then
   echo "✗ la suite falla sobre el plugin intacto — arregla eso antes de nada"
   tail -25 /tmp/gk-limpio.log
   exit 1
@@ -45,6 +61,8 @@ MUTACIONES=(
   'se realimenta una trampa ya cazada@@@const FEEDABLE = new Set(["verify"@@@const FEEDABLE = new Set(["protected_modified", "verify_removed", "verify"'
   'el examen borrado pasa en silencio@@@failures.push("verify_removed")@@@void 0'
   'suena tambien en verde limpio@@@const worthRinging = (failures.length && !willFeedback)@@@const worthRinging = true || (failures.length && !willFeedback)'
+  'el timeout nunca salta@@@Number(process.env.GATEKEEPER_VERIFY_TIMEOUT || 300)@@@999999'
+  'los gates corren en el checkout principal@@@if (!common || !own || common === own) return {}@@@if (false) return {}'
   'el veredicto de examen base se pierde@@@baseline = /^#@@@baseline = false && /^#'
 )
 
@@ -66,13 +84,13 @@ if o not in s:
 p.write_text(s.replace(o, m, 1))
 PY
   then
-    echo "✗ MUTACION CADUCADA: «$nombre» — su patron ya no esta en el plugin, actualiza este examen"
+    echo "✗ MUTACION CADUCADA: «${nombre}» — su patron ya no esta en el plugin, actualiza este examen"
     fallos=$((fallos + 1))
     continue
   fi
 
-  if $SUITE >/dev/null 2>&1; then
-    echo "✗ SOBREVIVE: «$nombre» — la suite pasa con el plugin roto"
+  if suite >/dev/null 2>&1; then
+    echo "✗ SOBREVIVE: «${nombre}» — la suite pasa con el plugin roto"
     fallos=$((fallos + 1))
   else
     echo "✓ cazada: $nombre"

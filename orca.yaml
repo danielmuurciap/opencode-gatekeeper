@@ -14,5 +14,9 @@ scripts:
     # toca incluir esta comprobacion dentro.)
     # La primera linea marca el examen como base: el plugin lo dice en el
     # tablero, para que un verde de no-regresion no se lea como uno de tarea.
-    printf '# gatekeeper:baseline\nnode --check plugin/gatekeeper.js\n' > .gatekeeper-verify
-    printf '.gatekeeper-verify\n.gatekeeper-protected\n' > .gatekeeper-protected
+    # La suite, no `node --check`: comprobar la sintaxis dejaba pasar cualquier
+    # cambio de comportamiento. Son 23 s y cubre los once gates. El examen de
+    # mutacion (scripts/mutantes.sh, ~4 min) no cabe aqui: rozaria el
+    # GATEKEEPER_VERIFY_TIMEOUT de 300 s. Ese se corre al recoger.
+    printf '# gatekeeper:baseline\nnode --test test/*.test.mjs\n' > .gatekeeper-verify
+    printf '.gatekeeper-verify\n.gatekeeper-protected\ntest/harness.mjs\nscripts/mutantes.sh\n' > .gatekeeper-protected
