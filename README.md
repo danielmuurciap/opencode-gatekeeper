@@ -63,7 +63,10 @@ echo 'quota.test.js'      > $WT/.gatekeeper-protected
 echo 'node quota.test.js' > $WT/.gatekeeper-verify
 
 # 3. Red first: if the exam already passes, it's tautological or the work is done
-node $WT/quota.test.js && echo "ABORT: exam is already green" 
+node $WT/quota.test.js && echo "ABORT: exam is already green"
+#    Read the red, don't just count it: a broken exam is red too. A `require`
+#    in a "type":"module" repo went red, the worker did the job correctly, and
+#    the gate failed it anyway. The red must be the failure you expect.
 
 # 4. Send the brief
 orca terminal send --terminal $HANDLE --text "Make quota.test.js pass. ..." --enter
@@ -132,6 +135,12 @@ scripts:
     printf 'npm run lint --silent\n' > .gatekeeper-verify
     printf '.gatekeeper-verify\n.gatekeeper-protected\n' > .gatekeeper-protected
 ```
+
+Mark the file with `# gatekeeper:baseline` on the first line and the board says
+`✓ examen base · sin examen de tarea`, logged as `verify:baseline:pass`. Without
+the marker it reads `✓ gates ok`. Seeding a default closes the no-exam hole, but
+it would open a smaller one if a non-regression green looked identical to a
+task green — the same failure walking back in through the door the fix opened.
 
 Two conditions, both of which cost us a debugging round: `orca.yaml` must be
 **pushed** (a worktree is cut from the remote branch, so a local-only commit
