@@ -1,0 +1,16 @@
+# Orca ejecuta esto al crear cada worktree de este repo, venga el despacho de
+# donde venga: el CLI, el drawer de issues, una automation o el movil.
+#
+# Por que aqui y no en el encargo: medido sobre 239 despachos reales, 193 iban
+# sin examen. El examen que escribe el despachador solo existe cuando el
+# despachador es un humano (o un agente) que se acuerda de sembrarlo. Este no
+# se olvida.
+scripts:
+  setup: |
+    set -e
+    # Examen BASE: mide no-regresion, no logro. Verde antes y verde despues.
+    # (El examen especifico de una tarea es el contrario: rojo antes, verde
+    # despues. Cuando el despachador siembre uno, pisa este a proposito — y le
+    # toca incluir esta comprobacion dentro.)
+    printf 'node --check plugin/gatekeeper.js\n' > .gatekeeper-verify
+    printf '.gatekeeper-verify\n.gatekeeper-protected\n' > .gatekeeper-protected
